@@ -1,10 +1,10 @@
-// index.js - MoonExtension 入口 v3.0
-// 功能：1) 开始游戏按钮 2) 快速开始/向导模式 3) 自动监听消息创建角色
+// index.js - MoonExtension 入口 v3.1
+// 修复：双重消息监听 + 新的逐行格式解析 + 名字提取
 
 (function() {
   'use strict';
 
-  console.log('MoonExtension v3.0 entry point loaded');
+  console.log('MoonExtension v3.1 entry point loaded');
 
   // ========== 配置 ==========
   const RACES = [
@@ -19,6 +19,9 @@
     { id: '牛头人', name: '牛头人', cardPrefix: '玩家-牛头人', icon: '🐂', color: '#d2691e',
       desc: '力量征服，魅力45/繁育70，NTR之道' }
   ];
+
+  // 防止重复处理
+  let isProcessing = false;
 
   // ========== 初始化 ==========
   function init() {
@@ -97,7 +100,7 @@
     content.querySelector('#moon-btn-cancel').onclick = () => menu.remove();
   }
 
-  // ========== UI: 种族选择器（快速开始） ==========
+  // ========== UI: 种族选择器 ==========
   function showRaceSelector() {
     const menu = document.createElement('div');
     menu.id = 'moon-race-selector';
@@ -128,14 +131,14 @@
     document.body.appendChild(menu);
 
     content.querySelectorAll('.moon-race-card').forEach(card => {
-      card.onmouseenter = () => { card.style.borderColor = card.querySelector('div:last-child').style.color || '#fff'; card.style.transform = 'scale(1.03)'; };
+      card.onmouseenter = () => { card.style.transform = 'scale(1.03)'; };
       card.onmouseleave = () => { card.style.transform = 'scale(1)'; };
       card.onclick = () => { menu.remove(); startAdventureQuick(card.dataset.race); };
     });
     content.querySelector('#moon-btn-back').onclick = () => { menu.remove(); showGameMenu(); };
   }
 
-  // ========== 快速开始：直接加载预设角色卡 ==========
+  // ========== 快速开始 ==========
   async function startAdventureQuick(raceId) {
     const race = RACES.find(r => r.id === raceId);
     if (!race) { showToast('未知种族', '#d9534f'); return; }
@@ -143,12 +146,10 @@
     showToast(`正在启动 ${race.name} 冒险...`, race.color);
 
     try {
-      // 打开角色列表
       const charBtn = document.getElementById('rm_button_characters');
       if (charBtn) charBtn.click();
       await sleep(800);
 
-      // 查找角色
       const charList = document.getElementById('rm_print_characters_block');
       if (!charList) throw new Error('找不到角色列表');
 
@@ -166,13 +167,12 @@
       }
 
       if (!targetChar) {
-        throw new Error(`找不到「${race.name}」角色卡。请先与向导对话创建角色，或安装角色卡包。`);
+        throw new Error(`找不到「${race.name}」角色卡。请先与向导对话创建角色。`);
       }
 
       targetChar.click();
       await sleep(600);
 
-      // 开始新聊天
       const newChatBtn = document.getElementById('option_start_new_chat');
       if (newChatBtn) {
         newChatBtn.click();
@@ -233,71 +233,243 @@
     }
   }
 
-  // ========== 核心功能：监听消息，自动创建角色 ==========
+  // ============================================================
+  // 核心功能：双重消息监听（MutationObserver + EventSource）
+  // ============================================================
   function setupMessageListener() {
-    // 检查 SillyTavern 的事件系统是否可用
-    if (typeof window.SillyTavern === 'undefined' || !window.SillyTavern.getContext) {
-      console.warn('MoonExtension: SillyTavern API 不可用，自动角色创建功能未启用');
-      return;
-    }
+    console.log('MoonExtension: 正在设置消息监听器...');
 
-    // 尝试获取 eventSource
-    const ctx = window.SillyTavern.getContext();
-    const eventSource = ctx.eventSource || window.eventSource;
-    const eventTypes = ctx.eventTypes || window.event_types;
+    // 方法1: MutationObserver 监听聊天容器 DOM 变化
+    setupMutationObserver();
 
-    if (!eventSource || !eventTypes || !eventTypes.MESSAGE_RECEIVED) {
-      console.warn('MoonExtension: 事件系统不可用，自动角色创建功能未启用');
-      return;
-    }
+    // 方法2: SillyTavern EventSource 事件监听
+    setupEventSourceListener();
 
-    console.log('MoonExtension: 消息监听器已注册');
-
-    eventSource.on(eventTypes.MESSAGE_RECEIVED, async (messageId, type) => {
-      try {
-        const context = window.SillyTavern.getContext();
-        const chat = context.chat;
-
-        if (!chat || !chat[messageId]) return;
-
-        const message = chat[messageId];
-        const mesText = message.mes || '';
-
-        // 检查是否是向导的消息（角色名包含"向导"）
-        const charName = message.name || '';
-        if (!charName.includes('向导')) return;
-
-        // 检查是否包含角色数据标记
-        const dataMatch = mesText.match(/\[CHARACTER_DATA\]([\s\S]*?)\[\/CHARACTER_DATA\]/);
-        if (!dataMatch) return;
-
-        console.log('MoonExtension: 检测到角色数据，开始创建角色...');
-
-        // 解析 JSON
-        let charData;
-        try {
-          charData = JSON.parse(dataMatch[1].trim());
-        } catch (e) {
-          console.error('MoonExtension: JSON 解析失败', e);
-          showToast('角色数据解析失败，请检查向导输出格式', '#d9534f');
-          return;
-        }
-
-        // 创建角色
-        await createCharacterFromData(charData);
-
-      } catch (e) {
-        console.error('MoonExtension: 处理消息时出错', e);
-      }
-    });
+    console.log('MoonExtension: 消息监听器设置完成');
   }
 
-  // ========== 调用 API 创建角色 ==========
+  // 方法1: MutationObserver 监听 DOM 变化
+  function setupMutationObserver() {
+    const chatContainer = document.getElementById('chat');
+    if (!chatContainer) {
+      console.warn('MoonExtension: 找不到聊天容器 #chat，MutationObserver 未启用');
+      // 重试
+      setTimeout(setupMutationObserver, 2000);
+      return;
+    }
+
+    console.log('MoonExtension: MutationObserver 已注册');
+
+    const observer = new MutationObserver((mutations) => {
+      if (isProcessing) return;
+
+      for (const mutation of mutations) {
+        if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
+          // 检查新增的消息节点
+          for (const node of mutation.addedNodes) {
+            if (node.nodeType === Node.ELEMENT_NODE && node.classList && node.classList.contains('mes')) {
+              checkMessageElement(node);
+            }
+          }
+        }
+      }
+    });
+
+    observer.observe(chatContainer, { childList: true, subtree: true });
+  }
+
+  // 检查单个消息元素
+  function checkMessageElement(element) {
+    try {
+      // 获取消息内容
+      const mesTextEl = element.querySelector('.mes_text');
+      if (!mesTextEl) return;
+
+      const rawHtml = mesTextEl.innerHTML;
+      const textContent = mesTextEl.textContent || '';
+
+      // 检查是否包含 CHARACTER_DATA 标记
+      if (!textContent.includes('[CHARACTER_DATA]')) return;
+
+      console.log('MoonExtension: MutationObserver 检测到 CHARACTER_DATA');
+
+      // 解析数据
+      const charData = parseCharacterData(textContent);
+      if (!charData) return;
+
+      // 防止重复处理
+      if (isProcessing) return;
+      isProcessing = true;
+
+      // 创建角色
+      createCharacterFromData(charData).finally(() => {
+        isProcessing = false;
+      });
+
+    } catch (e) {
+      console.error('MoonExtension: 检查消息元素时出错', e);
+    }
+  }
+
+  // 方法2: EventSource 事件监听
+  function setupEventSourceListener() {
+    try {
+      let eventSource = null;
+      let eventTypes = null;
+
+      // 尝试多种方式获取 eventSource
+      if (window.SillyTavern && window.SillyTavern.getContext) {
+        const ctx = window.SillyTavern.getContext();
+        eventSource = ctx.eventSource;
+        eventTypes = ctx.eventTypes;
+      }
+
+      if (!eventSource && window.eventSource) {
+        eventSource = window.eventSource;
+      }
+
+      if (!eventTypes && window.event_types) {
+        eventTypes = window.event_types;
+      }
+
+      if (!eventSource || !eventTypes || !eventTypes.MESSAGE_RECEIVED) {
+        console.warn('MoonExtension: SillyTavern EventSource 不可用');
+        return;
+      }
+
+      console.log('MoonExtension: EventSource 监听器已注册');
+
+      eventSource.on(eventTypes.MESSAGE_RECEIVED, async (messageId, type) => {
+        if (isProcessing) return;
+
+        try {
+          // 获取消息内容
+          let mesText = '';
+          let charName = '';
+
+          // 尝试从 SillyTavern 上下文获取
+          if (window.SillyTavern && window.SillyTavern.getContext) {
+            const ctx = window.SillyTavern.getContext();
+            const chat = ctx.chat;
+            if (chat && chat[messageId]) {
+              mesText = chat[messageId].mes || '';
+              charName = chat[messageId].name || '';
+            }
+          }
+
+          // 检查是否是向导消息且包含 CHARACTER_DATA
+          if (!mesText.includes('[CHARACTER_DATA]')) return;
+
+          // 检查发送者（如果不是向导，也可能是其他角色）
+          // 由于名字可能不准确，只要内容包含标记就处理
+          console.log('MoonExtension: EventSource 检测到 CHARACTER_DATA');
+
+          const charData = parseCharacterData(mesText);
+          if (!charData) return;
+
+          isProcessing = true;
+          await createCharacterFromData(charData);
+          isProcessing = false;
+
+        } catch (e) {
+          console.error('MoonExtension: EventSource 处理消息时出错', e);
+          isProcessing = false;
+        }
+      });
+
+    } catch (e) {
+      console.warn('MoonExtension: EventSource 设置失败', e);
+    }
+  }
+
+  // ============================================================
+  // 解析 CHARACTER_DATA 数据块（新的逐行键值对格式）
+  // ============================================================
+  function parseCharacterData(text) {
+    try {
+      const match = text.match(/\[CHARACTER_DATA\]([\s\S]*?)\[\/CHARACTER_DATA\]/);
+      if (!match) {
+        console.log('MoonExtension: 未找到 CHARACTER_DATA 标记');
+        return null;
+      }
+
+      const content = match[1].trim();
+      console.log('MoonExtension: 找到 CHARACTER_DATA 内容，长度:', content.length);
+
+      const data = {};
+      const lines = content.split('\n');
+      let currentKey = null;
+      let currentValue = '';
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (!line) continue;
+
+        // 检查是否是键值对（包含第一个冒号）
+        const colonIndex = line.indexOf(':');
+        if (colonIndex > 0) {
+          // 如果之前有未保存的键值对，先保存
+          if (currentKey) {
+            data[currentKey] = currentValue.trim();
+          }
+
+          currentKey = line.substring(0, colonIndex).trim();
+          currentValue = line.substring(colonIndex + 1).trim();
+        } else {
+          // 继续上一行的值（多行内容）
+          if (currentKey) {
+            currentValue += '\n' + line;
+          }
+        }
+      }
+
+      // 保存最后一个键值对
+      if (currentKey) {
+        data[currentKey] = currentValue.trim();
+      }
+
+      console.log('MoonExtension: 解析到的键:', Object.keys(data));
+
+      // 验证必要字段
+      if (!data['角色名称'] && !data['name']) {
+        console.warn('MoonExtension: 缺少角色名称');
+        return null;
+      }
+
+      // 转换为 API 需要的格式
+      return {
+        name: data['角色名称'] || data['name'] || '未命名角色',
+        description: data['描述'] || data['description'] || '',
+        personality: data['性格'] || data['personality'] || '',
+        scenario: data['场景'] || data['scenario'] || '',
+        first_mes: data['开场白'] || data['first_mes'] || '',
+        mes_example: data['对话示例'] || data['mes_example'] || '',
+        creatorcomment: data['备注'] || data['creatorcomment'] || '',
+        character_version: data['版本'] || data['character_version'] || '1.0',
+        tags: parseTags(data['标签'] || data['tags'] || ''),
+      };
+
+    } catch (e) {
+      console.error('MoonExtension: 解析 CHARACTER_DATA 失败', e);
+      return null;
+    }
+  }
+
+  // 解析标签
+  function parseTags(tagStr) {
+    if (!tagStr) return [];
+    return tagStr.split(/[,，]/).map(t => t.trim()).filter(t => t);
+  }
+
+  // ============================================================
+  // 调用 API 创建角色
+  // ============================================================
   async function createCharacterFromData(data) {
-    showToast('📝 正在创建角色...', '#6d28d9');
+    console.log('MoonExtension: 开始创建角色:', data.name);
+    showToast('📝 正在创建角色「' + data.name + '」...', '#6d28d9');
 
     const characterData = {
-      ch_name: data.name || '未命名角色',
+      ch_name: data.name,
       description: data.description || '',
       personality: data.personality || '',
       scenario: data.scenario || '',
@@ -329,7 +501,7 @@
       const avatarKey = await response.text();
       console.log('MoonExtension: 角色创建成功，avatarKey=', avatarKey);
 
-      // 刷新角色列表并切换到新角色
+      // 切换角色并开始新聊天
       await selectNewCharacter(avatarKey, data.name);
 
     } catch (e) {
@@ -338,49 +510,59 @@
     }
   }
 
-  // ========== 选择新角色并开始新聊天 ==========
+  // ============================================================
+  // 选择新角色并开始新聊天
+  // ============================================================
   async function selectNewCharacter(avatarKey, charName) {
     showToast('🔄 正在切换到新角色...', '#6d28d9');
 
     try {
       // 刷新角色列表
-      const context = window.SillyTavern.getContext();
-
-      // 尝试刷新角色列表（通过触发字符列表重载）
       if (typeof window.getCharacters === 'function') {
         await window.getCharacters();
       }
 
-      await sleep(1000);
+      await sleep(1500);
 
-      // 查找新创建的角色索引
+      // 查找角色索引
       let charIndex = -1;
-      if (context.characters) {
-        charIndex = context.characters.findIndex(c => c.avatar === avatarKey);
+      let charactersList = null;
+
+      // 尝试多种方式获取角色列表
+      if (window.SillyTavern && window.SillyTavern.getContext) {
+        const ctx = window.SillyTavern.getContext();
+        charactersList = ctx.characters;
+      }
+      if (!charactersList && window.characters) {
+        charactersList = window.characters;
       }
 
-      if (charIndex === -1 && window.characters) {
-        charIndex = window.characters.findIndex(c => c.avatar === avatarKey);
+      if (charactersList) {
+        // 先按 avatarKey 查找
+        charIndex = charactersList.findIndex(c => c.avatar === avatarKey);
+        if (charIndex === -1) {
+          charIndex = charactersList.findIndex(c => c.name === charName);
+        }
       }
 
-      if (charIndex === -1) {
-        console.warn('MoonExtension: 无法在角色列表中找到新角色，尝试通过名称查找');
-        if (context.characters) {
-          charIndex = context.characters.findIndex(c => c.name === charName);
-        }
-        if (charIndex === -1 && window.characters) {
-          charIndex = window.characters.findIndex(c => c.name === charName);
-        }
-      }
+      console.log('MoonExtension: 角色索引=', charIndex, '列表长度=', charactersList ? charactersList.length : 0);
 
       if (charIndex !== -1) {
-        // 使用 SillyTavern 的 selectCharacterById
-        const selectFn = context.selectCharacterById || window.selectCharacterById;
+        // 切换角色
+        let selectFn = null;
+
+        if (window.SillyTavern && window.SillyTavern.getContext) {
+          selectFn = window.SillyTavern.getContext().selectCharacterById;
+        }
+        if (!selectFn && window.selectCharacterById) {
+          selectFn = window.selectCharacterById;
+        }
+
         if (selectFn) {
           await selectFn(charIndex);
           console.log('MoonExtension: 已切换到角色', charName);
 
-          await sleep(800);
+          await sleep(1000);
 
           // 开始新聊天
           const newChatBtn = document.getElementById('option_start_new_chat');
@@ -422,7 +604,6 @@
   }
 
   function getCSRFToken() {
-    // 尝试从 cookie 或 meta 标签获取
     const cookieMatch = document.cookie.match(/csrf-token=([^;]+)/);
     if (cookieMatch) return cookieMatch[1];
 
@@ -432,7 +613,7 @@
     return '';
   }
 
-  // ========== CSS 动画 ==========
+  // ========== CSS ==========
   const style = document.createElement('style');
   style.textContent = `
     @keyframes moonFadeInUp {
@@ -444,6 +625,6 @@
 
   // ========== 启动 ==========
   setTimeout(init, 500);
-  setTimeout(init, 1500);
-  setTimeout(init, 3000);
+  setTimeout(init, 2000);
+  setTimeout(init, 4000);
 })();
