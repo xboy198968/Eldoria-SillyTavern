@@ -1,0 +1,19 @@
+{
+  "name": "星之暗面",
+  "version": "1.0.0",
+  "description": "一款基于SillyTavern的奇幻角色扮演游戏",
+  "author": "你的名称",
+  "requirements": {
+    "sillytavern": ">=1.18.0",
+    "node": ">=18.0.0"
+  },
+  "api_config": {
+    "chat_completion_source": "openai",
+    "reverse_proxy": "https://aiself.vip/v1",
+    "openai_model": "kimi-for-coding",
+    "stream_openai": false,
+    "pres_pen_openai": 0,
+    "freq_pen_openai": 0,
+    "note": "请将proxy_password替换为你自己的API Key"
+  }
+}

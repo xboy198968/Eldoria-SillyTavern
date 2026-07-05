@@ -1,0 +1,16 @@
+{
+  "name": "MoonExtension",
+  "version": "2.0.0",
+  "description": "星之暗面核心扩展系统",
+  "author": "星之暗面开发组",
+  "type": "utility",
+  "entry": "index.js",
+  "requires": [],
+  "css": [],
+  "js": [
+    "Moon_Core.js",
+    "Moon_Memory.js",
+    "Moon_Stats.js",
+    "Moon_Combat.js"
+  ]
+}
