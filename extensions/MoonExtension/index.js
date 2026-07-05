@@ -1,10 +1,10 @@
-// index.js - MoonExtension 入口 v3.1
-// 修复：双重消息监听 + 新的逐行格式解析 + 名字提取
+// index.js - MoonExtension 入口 v3.2
+// 修复：更强的消息检测 + 调试日志 + 手动触发按钮
 
 (function() {
   'use strict';
 
-  console.log('MoonExtension v3.1 entry point loaded');
+  console.log('MoonExtension v3.2 entry point loaded');
 
   // ========== 配置 ==========
   const RACES = [
@@ -28,6 +28,7 @@
     console.log('MoonExtension: 初始化...');
     addStartGameButton();
     setupMessageListener();
+    addDebugButton(); // 调试用
   }
 
   // ========== UI: 开始游戏按钮 ==========
@@ -64,6 +65,44 @@
       target.appendChild(btn);
     }
     console.log('MoonExtension: 开始游戏按钮已添加');
+  }
+
+  // ========== 调试按钮 ==========
+  function addDebugButton() {
+    const btn = document.createElement('div');
+    btn.id = 'moon-debug-btn';
+    btn.innerHTML = '🔍 检测CHARACTER_DATA';
+    btn.style.cssText = 'position:fixed;bottom:80px;right:20px;background:#333;color:#aaa;padding:6px 12px;border-radius:6px;font-size:12px;cursor:pointer;z-index:9999;opacity:0.7;';
+    btn.onclick = () => {
+      const result = manualScanForCharacterData();
+      if (result) {
+        showToast('✅ 检测到CHARACTER_DATA！正在创建角色...', '#5cb85c');
+        isProcessing = true;
+        createCharacterFromData(result).finally(() => { isProcessing = false; });
+      } else {
+        showToast('❌ 未检测到CHARACTER_DATA，请确保向导已输出数据块', '#d9534f');
+      }
+    };
+    document.body.appendChild(btn);
+    console.log('MoonExtension: 调试按钮已添加（右下角）');
+  }
+
+  // ========== 手动扫描 ==========
+  function manualScanForCharacterData() {
+    const chatContainer = document.getElementById('chat');
+    if (!chatContainer) return null;
+
+    const messages = chatContainer.querySelectorAll('.mes');
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const mesTextEl = messages[i].querySelector('.mes_text');
+      if (!mesTextEl) continue;
+      const text = mesTextEl.textContent || '';
+      if (text.includes('[CHARACTER_DATA]')) {
+        console.log('MoonExtension: 手动扫描检测到CHARACTER_DATA');
+        return parseCharacterData(text);
+      }
+    }
+    return null;
   }
 
   // ========== UI: 游戏菜单 ==========
@@ -250,10 +289,19 @@
 
   // 方法1: MutationObserver 监听 DOM 变化
   function setupMutationObserver() {
-    const chatContainer = document.getElementById('chat');
+    // 尝试多个可能的聊天容器
+    const chatSelectors = ['#chat', '#sheld', '.chat', '#chat_container', '[id*="chat"]'];
+    let chatContainer = null;
+    for (const sel of chatSelectors) {
+      chatContainer = document.querySelector(sel);
+      if (chatContainer) {
+        console.log('MoonExtension: 找到聊天容器:', sel);
+        break;
+      }
+    }
+
     if (!chatContainer) {
-      console.warn('MoonExtension: 找不到聊天容器 #chat，MutationObserver 未启用');
-      // 重试
+      console.warn('MoonExtension: 找不到聊天容器，MutationObserver 未启用');
       setTimeout(setupMutationObserver, 2000);
       return;
     }
@@ -265,10 +313,22 @@
 
       for (const mutation of mutations) {
         if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
-          // 检查新增的消息节点
           for (const node of mutation.addedNodes) {
-            if (node.nodeType === Node.ELEMENT_NODE && node.classList && node.classList.contains('mes')) {
-              checkMessageElement(node);
+            if (node.nodeType === Node.ELEMENT_NODE) {
+              // 尝试多种消息元素类名
+              const isMessage = node.classList && (
+                node.classList.contains('mes') ||
+                node.classList.contains('mes_block') ||
+                node.classList.contains('message')
+              );
+              if (isMessage) {
+                checkMessageElement(node);
+              }
+              // 也检查子元素
+              if (node.querySelectorAll) {
+                const childMessages = node.querySelectorAll('.mes, .mes_block, .message');
+                childMessages.forEach(checkMessageElement);
+              }
             }
           }
         }
@@ -281,11 +341,25 @@
   // 检查单个消息元素
   function checkMessageElement(element) {
     try {
-      // 获取消息内容
-      const mesTextEl = element.querySelector('.mes_text');
-      if (!mesTextEl) return;
+      // 尝试多种选择器获取消息内容
+      let mesTextEl = element.querySelector('.mes_text');
+      if (!mesTextEl) mesTextEl = element.querySelector('.mes_block');
+      if (!mesTextEl) mesTextEl = element.querySelector('.message_text');
+      if (!mesTextEl) mesTextEl = element.querySelector('[class*="text"]');
+      if (!mesTextEl) {
+        // 尝试直接获取元素的文本内容
+        const text = element.textContent || '';
+        if (text.includes('[CHARACTER_DATA]')) {
+          console.log('MoonExtension: 从元素textContent检测到CHARACTER_DATA');
+          const charData = parseCharacterData(text);
+          if (charData && !isProcessing) {
+            isProcessing = true;
+            createCharacterFromData(charData).finally(() => { isProcessing = false; });
+          }
+        }
+        return;
+      }
 
-      const rawHtml = mesTextEl.innerHTML;
       const textContent = mesTextEl.textContent || '';
 
       // 检查是否包含 CHARACTER_DATA 标记
@@ -345,7 +419,6 @@
         try {
           // 获取消息内容
           let mesText = '';
-          let charName = '';
 
           // 尝试从 SillyTavern 上下文获取
           if (window.SillyTavern && window.SillyTavern.getContext) {
@@ -353,15 +426,11 @@
             const chat = ctx.chat;
             if (chat && chat[messageId]) {
               mesText = chat[messageId].mes || '';
-              charName = chat[messageId].name || '';
             }
           }
 
-          // 检查是否是向导消息且包含 CHARACTER_DATA
           if (!mesText.includes('[CHARACTER_DATA]')) return;
 
-          // 检查发送者（如果不是向导，也可能是其他角色）
-          // 由于名字可能不准确，只要内容包含标记就处理
           console.log('MoonExtension: EventSource 检测到 CHARACTER_DATA');
 
           const charData = parseCharacterData(mesText);
@@ -383,7 +452,7 @@
   }
 
   // ============================================================
-  // 解析 CHARACTER_DATA 数据块（新的逐行键值对格式）
+  // 解析 CHARACTER_DATA 数据块
   // ============================================================
   function parseCharacterData(text) {
     try {
@@ -405,38 +474,31 @@
         const line = lines[i].trim();
         if (!line) continue;
 
-        // 检查是否是键值对（包含第一个冒号）
         const colonIndex = line.indexOf(':');
         if (colonIndex > 0) {
-          // 如果之前有未保存的键值对，先保存
           if (currentKey) {
             data[currentKey] = currentValue.trim();
           }
-
           currentKey = line.substring(0, colonIndex).trim();
           currentValue = line.substring(colonIndex + 1).trim();
         } else {
-          // 继续上一行的值（多行内容）
           if (currentKey) {
             currentValue += '\n' + line;
           }
         }
       }
 
-      // 保存最后一个键值对
       if (currentKey) {
         data[currentKey] = currentValue.trim();
       }
 
       console.log('MoonExtension: 解析到的键:', Object.keys(data));
 
-      // 验证必要字段
       if (!data['角色名称'] && !data['name']) {
         console.warn('MoonExtension: 缺少角色名称');
         return null;
       }
 
-      // 转换为 API 需要的格式
       return {
         name: data['角色名称'] || data['name'] || '未命名角色',
         description: data['描述'] || data['description'] || '',
@@ -501,7 +563,6 @@
       const avatarKey = await response.text();
       console.log('MoonExtension: 角色创建成功，avatarKey=', avatarKey);
 
-      // 切换角色并开始新聊天
       await selectNewCharacter(avatarKey, data.name);
 
     } catch (e) {
@@ -517,18 +578,15 @@
     showToast('🔄 正在切换到新角色...', '#6d28d9');
 
     try {
-      // 刷新角色列表
       if (typeof window.getCharacters === 'function') {
         await window.getCharacters();
       }
 
       await sleep(1500);
 
-      // 查找角色索引
       let charIndex = -1;
       let charactersList = null;
 
-      // 尝试多种方式获取角色列表
       if (window.SillyTavern && window.SillyTavern.getContext) {
         const ctx = window.SillyTavern.getContext();
         charactersList = ctx.characters;
@@ -538,7 +596,6 @@
       }
 
       if (charactersList) {
-        // 先按 avatarKey 查找
         charIndex = charactersList.findIndex(c => c.avatar === avatarKey);
         if (charIndex === -1) {
           charIndex = charactersList.findIndex(c => c.name === charName);
@@ -548,7 +605,6 @@
       console.log('MoonExtension: 角色索引=', charIndex, '列表长度=', charactersList ? charactersList.length : 0);
 
       if (charIndex !== -1) {
-        // 切换角色
         let selectFn = null;
 
         if (window.SillyTavern && window.SillyTavern.getContext) {
@@ -564,7 +620,6 @@
 
           await sleep(1000);
 
-          // 开始新聊天
           const newChatBtn = document.getElementById('option_start_new_chat');
           if (newChatBtn) {
             newChatBtn.click();
